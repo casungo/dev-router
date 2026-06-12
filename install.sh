@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="${DEV_ROUTER_REPO_URL:-https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/dev-router/main}"
-INSTALL_DIR="${HOME}/.local/bin"
+REPO_URL="${DEV_ROUTER_REPO_URL:-https://raw.githubusercontent.com/casungo/dev-router/main}"
+INSTALL_DIR="${DEV_ROUTER_INSTALL_DIR:-${HOME}/.local/bin}"
 TARGET="${INSTALL_DIR}/dev"
 
 mkdir -p "$INSTALL_DIR"

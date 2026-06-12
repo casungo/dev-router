@@ -1,6 +1,8 @@
 # dev-router
 
-Friendly local router for AI coding CLIs.
+Opinionated local router for AI coding CLIs.
+
+This is built around my setup and preferences. It hardcodes choices I personally want, including permissive launch flags like `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions`, my default model names, and my fallback order. Treat it as a useful starting point to fork or edit, not as a general-purpose safety wrapper.
 
 Run `dev` from any repo and it checks provider quota before launching the first available coding agent:
 
@@ -10,18 +12,19 @@ Run `dev` from any repo and it checks provider quota before launching the first 
 4. DeepSeek through Claude Code
 
 It caches quota checks for 5 minutes, supports `dev --status`, and lets you directly launch one provider when you already know what you want.
+You can also change the routing order interactively.
 
 ## Install
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/dev-router/main/install.sh | bash
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/install.sh | bash
 ```
 
 Manual install:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
-curl -fsSL https://raw.githubusercontent.com/YOUR_GITHUB_USERNAME/dev-router/main/bin/dev \
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/bin/dev \
   -o "$HOME/.local/bin/dev"
 chmod +x "$HOME/.local/bin/dev"
 ```
@@ -30,6 +33,12 @@ Make sure `~/.local/bin` is on your PATH:
 
 ```bash
 export PATH="$HOME/.local/bin:$PATH"
+```
+
+To install somewhere else:
+
+```bash
+DEV_ROUTER_INSTALL_DIR="$HOME/bin" bash install.sh
 ```
 
 ## Configuration
@@ -50,6 +59,12 @@ export PATH="$HOME/.local/bin:$PATH"
 
 Codex auth is read from `~/.codex/auth.json`. Antigravity auth is handled by `agy`.
 
+Quota checks need `jq`, `curl`, and `timeout` or `gtimeout`. On macOS, `gtimeout` is provided by GNU coreutils:
+
+```bash
+brew install coreutils jq
+```
+
 ## Usage
 
 Auto-route to the first available provider:
@@ -64,6 +79,17 @@ Show all quota states:
 ```bash
 dev --status
 ```
+
+Show or modify the provider routing order:
+
+```bash
+dev --order
+dev --order edit
+dev --order set glm codex agy deepseek
+dev --order reset
+```
+
+The order is saved in `~/.config/dev-router/order`, or in `$DEV_ROUTER_ORDER_FILE` if you set it.
 
 Launch one provider directly and skip routing:
 
@@ -99,7 +125,7 @@ The script reads model defaults from environment variables, so you can override 
 
 ```bash
 export DEV_CODEX_MODEL="gpt-5.5"
-export DEV_GLM_MODEL="GLM-4.7"
+export DEV_GLM_MODEL="GLM-5.1"
 export DEV_GLM_FAST_MODEL="GLM-4.5-Air"
 export DEV_AGY_MODEL="Claude Sonnet 4.6 (Thinking)"
 export DEV_DEEPSEEK_MODEL="deepseek-v4-pro[1m]"
@@ -107,6 +133,8 @@ export DEV_DEEPSEEK_FAST_MODEL="deepseek-v4-flash"
 ```
 
 ## Notes
+
+This script launches tools with permission-skipping flags because that is how I use these CLIs locally. Remove those flags in `bin/dev` if you want each agent to ask for approval.
 
 GLM quota checks use the Z.AI Coding Plan endpoint. Antigravity quota checks are based on launching `agy` and reading `/usage`, because the public CLI quota endpoint is not documented.
 
