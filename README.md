@@ -1,6 +1,10 @@
 # dev-router
 
-Opinionated local router for AI coding CLIs.
+[![Release](https://img.shields.io/github/v/release/casungo/dev-router)](https://github.com/casungo/dev-router/releases)
+[![License](https://img.shields.io/github/license/casungo/dev-router)](LICENSE)
+[![Shell](https://img.shields.io/badge/shell-bash-4EAA25)](bin/dev)
+
+Opinionated Bash router for AI coding CLIs with quota-aware fallback, configurable provider order, and self-updates from GitHub Releases.
 
 This is built around my setup and preferences. It hardcodes choices I personally want, including permissive launch flags like `--dangerously-bypass-approvals-and-sandbox` / `--dangerously-skip-permissions`, my default model names, and my fallback order. Treat it as a useful starting point to fork or edit, not as a general-purpose safety wrapper.
 
@@ -13,6 +17,14 @@ Run `dev` from any repo and it checks provider quota before launching the first 
 
 It caches quota checks for 5 minutes, supports `dev --status`, and lets you directly launch one provider when you already know what you want.
 You can also change the routing order interactively.
+
+## Features
+
+- Quota-aware routing across Codex, GLM, Antigravity, and DeepSeek
+- 5-minute quota cache to avoid repeated network checks
+- Interactive or file-based provider order
+- Direct provider launches when you want to skip routing
+- Self-update command and once-per-day automatic update checks
 
 ## Install
 
@@ -58,6 +70,8 @@ export PATH="$HOME/.local/bin:$PATH"
 ```
 
 Codex auth is read from `~/.codex/auth.json`. Antigravity auth is handled by `agy`.
+
+## Requirements
 
 Quota checks need `jq`, `curl`, and `timeout` or `gtimeout`. On macOS, `gtimeout` is provided by GNU coreutils:
 
