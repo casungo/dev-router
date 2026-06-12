@@ -1,0 +1,8 @@
+{
+  "name": "dev-router",
+  "private": true,
+  "scripts": {
+    "check": "bash -n bin/dev install.sh lib/dev-router/*.bash && ./bin/dev --version && ./bin/dev --help",
+    "release": "scripts/release"
+  }
+}

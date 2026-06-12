@@ -135,9 +135,12 @@ The self-updater reads the latest release from `casungo/dev-router` and download
 
 To publish a new version:
 
-1. Update `DEV_ROUTER_VERSION` in `bin/dev`.
-2. Commit and push the change.
-3. Create a GitHub release whose tag matches the version, for example `v0.1.1`.
+```bash
+pnpm release patch
+```
+
+You can also pass `minor`, `major`, or an explicit version such as `0.1.3`.
+The release helper updates `DEV_ROUTER_VERSION` in `bin/dev`, runs the safe checks, commits and pushes the bump, creates a matching tag, and publishes the GitHub release.
 
 Existing installs update on the next `dev` run after their daily update check is due, or immediately when running `dev --update`.
 
