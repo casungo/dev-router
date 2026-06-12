@@ -36,8 +36,19 @@ Manual install:
 
 ```bash
 mkdir -p "$HOME/.local/bin"
+mkdir -p "$HOME/.local/lib/dev-router"
 curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/bin/dev \
   -o "$HOME/.local/bin/dev"
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/lib/dev-router/core.bash \
+  -o "$HOME/.local/lib/dev-router/core.bash"
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/lib/dev-router/update.bash \
+  -o "$HOME/.local/lib/dev-router/update.bash"
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/lib/dev-router/cache-order.bash \
+  -o "$HOME/.local/lib/dev-router/cache-order.bash"
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/lib/dev-router/providers.bash \
+  -o "$HOME/.local/lib/dev-router/providers.bash"
+curl -fsSL https://raw.githubusercontent.com/casungo/dev-router/main/lib/dev-router/commands.bash \
+  -o "$HOME/.local/lib/dev-router/commands.bash"
 chmod +x "$HOME/.local/bin/dev"
 ```
 
@@ -120,7 +131,7 @@ The order is saved in `~/.config/dev-router/order`, or in `$DEV_ROUTER_ORDER_FIL
 
 ## Publishing Updates
 
-The self-updater reads the latest release from `casungo/dev-router` and downloads `bin/dev` from that release tag.
+The self-updater reads the latest release from `casungo/dev-router` and downloads the matching `bin/dev` plus `lib/dev-router/*.bash` files from that release tag.
 
 To publish a new version:
 
@@ -173,8 +184,8 @@ export DEV_DEEPSEEK_FAST_MODEL="deepseek-v4-flash"
 
 ## Notes
 
-This script launches tools with permission-skipping flags because that is how I use these CLIs locally. Remove those flags in `bin/dev` if you want each agent to ask for approval.
+This script launches tools with permission-skipping flags because that is how I use these CLIs locally. Remove those flags in `lib/dev-router/commands.bash` if you want each agent to ask for approval.
 
 GLM quota checks use the Z.AI Coding Plan endpoint. Antigravity quota checks are based on launching `agy` and reading `/usage`, because the public CLI quota endpoint is not documented.
 
-If Antigravity later exposes a stable status or quota API, replace the `/usage` probe in `bin/dev` with that official endpoint.
+If Antigravity later exposes a stable status or quota API, replace the `/usage` probe in `lib/dev-router/providers.bash` with that official endpoint.
