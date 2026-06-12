@@ -80,6 +80,19 @@ Show all quota states:
 dev --status
 ```
 
+Show the installed version or update from the latest GitHub release:
+
+```bash
+dev --version
+dev --update
+```
+
+`dev` also checks for a newer GitHub release at most once per day and updates itself automatically when a newer release is available. Disable that with:
+
+```bash
+export DEV_ROUTER_AUTO_UPDATE=0
+```
+
 Show or modify the provider routing order:
 
 ```bash
@@ -90,6 +103,18 @@ dev --order reset
 ```
 
 The order is saved in `~/.config/dev-router/order`, or in `$DEV_ROUTER_ORDER_FILE` if you set it.
+
+## Publishing Updates
+
+The self-updater reads the latest release from `casungo/dev-router` and downloads `bin/dev` from that release tag.
+
+To publish a new version:
+
+1. Update `DEV_ROUTER_VERSION` in `bin/dev`.
+2. Commit and push the change.
+3. Create a GitHub release whose tag matches the version, for example `v0.1.1`.
+
+Existing installs update on the next `dev` run after their daily update check is due, or immediately when running `dev --update`.
 
 Launch one provider directly and skip routing:
 

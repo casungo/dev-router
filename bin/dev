@@ -1,11 +1,17 @@
 #!/usr/bin/env bash
 set -u
 
+DEV_ROUTER_VERSION="0.1.0"
+DEV_ROUTER_GITHUB_REPO="${DEV_ROUTER_GITHUB_REPO:-casungo/dev-router}"
+DEV_ROUTER_AUTO_UPDATE="${DEV_ROUTER_AUTO_UPDATE:-1}"
+
 CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dev-quota"
 CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/dev-router"
 ORDER_FILE="${DEV_ROUTER_ORDER_FILE:-$CONFIG_DIR/order}"
 CACHE_TTL_SECONDS=300
 CHECK_TIMEOUT_SECONDS=3
+AUTO_UPDATE_TTL_SECONDS="${DEV_ROUTER_AUTO_UPDATE_TTL_SECONDS:-86400}"
+UPDATE_CACHE_FILE="$CACHE_DIR/dev-router-update-check"
 DEFAULT_PROVIDER_ORDER=(codex glm antigravity deepseek)
 
 DEV_CODEX_MODEL="${DEV_CODEX_MODEL:-gpt-5.5}"
@@ -34,6 +40,22 @@ require_curl() {
   require_command curl "quota checks"
 }
 
+require_update_curl() {
+  require_command curl "updates"
+}
+
+self_path() {
+  local source
+  source="${BASH_SOURCE[0]:-$0}"
+  if [[ "$source" == */* ]]; then
+    (cd "$(dirname "$source")" 2>/dev/null && printf '%s/%s\n' "$PWD" "$(basename "$source")")
+  elif command -v "$source" >/dev/null 2>&1; then
+    command -v "$source"
+  else
+    printf '%s\n' "$source"
+  fi
+}
+
 timeout_bin() {
   if command -v timeout >/dev/null 2>&1; then
     printf 'timeout\n'
@@ -45,8 +67,9 @@ timeout_bin() {
 }
 
 require_timeout() {
+  local purpose="${1:-${CHECK_TIMEOUT_SECONDS}-second quota checks}"
   if ! timeout_bin >/dev/null; then
-    echo "[dev] timeout or gtimeout is required for ${CHECK_TIMEOUT_SECONDS}-second quota checks" >&2
+    echo "[dev] timeout or gtimeout is required for $purpose" >&2
     echo "[dev] on macOS, install GNU coreutils to get gtimeout" >&2
     return 127
   fi
@@ -63,6 +86,169 @@ run_with_timeout() {
   }
 
   "$bin" "$seconds" "$@"
+}
+
+version_normalize() {
+  printf '%s\n' "${1#v}" | sed 's/[^0-9.].*$//'
+}
+
+version_is_newer() {
+  local latest current latest_part current_part i
+  IFS=. read -r -a latest_part <<<"$(version_normalize "$1")"
+  IFS=. read -r -a current_part <<<"$(version_normalize "$2")"
+
+  for i in 0 1 2; do
+    latest_part[$i]="${latest_part[$i]:-0}"
+    current_part[$i]="${current_part[$i]:-0}"
+    [[ "${latest_part[$i]}" =~ ^[0-9]+$ ]] || latest_part[$i]=0
+    [[ "${current_part[$i]}" =~ ^[0-9]+$ ]] || current_part[$i]=0
+
+    if ((10#${latest_part[$i]} > 10#${current_part[$i]})); then
+      return 0
+    fi
+    if ((10#${latest_part[$i]} < 10#${current_part[$i]})); then
+      return 1
+    fi
+  done
+
+  return 1
+}
+
+latest_release_tag() {
+  local url tmp http_code curl_rc tag
+  require_update_curl || return $?
+  require_jq || return $?
+  require_timeout "updates" || return $?
+
+  url="https://api.github.com/repos/${DEV_ROUTER_GITHUB_REPO}/releases/latest"
+  tmp="$(mktemp)"
+  http_code="$(
+    run_with_timeout "$CHECK_TIMEOUT_SECONDS" curl -fsSL \
+      -H "Accept: application/vnd.github+json" \
+      "$url" \
+      -o "$tmp" \
+      -w '%{http_code}' 2>/dev/null
+  )"
+  curl_rc=$?
+
+  if [[ "$curl_rc" -ne 0 || "${http_code:-0}" -ne 200 ]]; then
+    rm -f "$tmp"
+    return 1
+  fi
+
+  tag="$(jq -r '.tag_name // empty' "$tmp" 2>/dev/null)"
+  rm -f "$tmp"
+  [[ -n "$tag" ]] || return 1
+  printf '%s\n' "$tag"
+}
+
+download_version() {
+  local tag target url
+  tag="$1"
+  target="$2"
+  require_update_curl || return $?
+  require_timeout "updates" || return $?
+
+  url="https://raw.githubusercontent.com/${DEV_ROUTER_GITHUB_REPO}/${tag}/bin/dev"
+  run_with_timeout "$CHECK_TIMEOUT_SECONDS" curl -fsSL "$url" -o "$target"
+}
+
+install_downloaded_update() {
+  local downloaded target tmp_target
+  downloaded="$1"
+  target="$(self_path)"
+  tmp_target="${target}.update.$$"
+
+  if [[ ! -f "$target" || ! -w "$target" ]]; then
+    echo "[dev] cannot update $target; file is not writable" >&2
+    return 1
+  fi
+
+  if ! head -n 1 "$downloaded" | grep -q '^#!/usr/bin/env bash'; then
+    echo "[dev] downloaded update does not look like a bash script" >&2
+    return 1
+  fi
+
+  if ! grep -q '^DEV_ROUTER_VERSION=' "$downloaded"; then
+    echo "[dev] downloaded update does not look like dev-router" >&2
+    return 1
+  fi
+
+  cp "$downloaded" "$tmp_target" || return $?
+  chmod +x "$tmp_target" || {
+    rm -f "$tmp_target"
+    return 1
+  }
+  mv "$tmp_target" "$target"
+}
+
+update_dev_router() {
+  local latest tmp
+  latest="$(latest_release_tag)" || {
+    echo "[dev] could not find latest release for ${DEV_ROUTER_GITHUB_REPO}" >&2
+    return 1
+  }
+
+  if ! version_is_newer "$latest" "$DEV_ROUTER_VERSION"; then
+    echo "[dev] dev-router is already up to date ($DEV_ROUTER_VERSION)"
+    return 0
+  fi
+
+  tmp="$(mktemp)"
+  if ! download_version "$latest" "$tmp"; then
+    rm -f "$tmp"
+    echo "[dev] failed to download dev-router $latest" >&2
+    return 1
+  fi
+
+  if install_downloaded_update "$tmp"; then
+    rm -f "$tmp"
+    mkdir -p "$CACHE_DIR"
+    date +%s >"$UPDATE_CACHE_FILE"
+    echo "[dev] updated dev-router $DEV_ROUTER_VERSION -> $latest"
+    return 0
+  fi
+
+  rm -f "$tmp"
+  return 1
+}
+
+auto_update_is_due() {
+  local now mtime age
+  [[ "$DEV_ROUTER_AUTO_UPDATE" == "1" ]] || return 1
+  [[ "$DEV_ROUTER_VERSION" != "0.0.0-dev" ]] || return 1
+
+  now="$(date +%s)"
+  if [[ -f "$UPDATE_CACHE_FILE" ]]; then
+    mtime="$(cat "$UPDATE_CACHE_FILE" 2>/dev/null || echo 0)"
+    [[ "$mtime" =~ ^[0-9]+$ ]] || mtime=0
+    age=$((now - mtime))
+    [[ "$age" -ge "$AUTO_UPDATE_TTL_SECONDS" ]] || return 1
+  fi
+
+  return 0
+}
+
+auto_update_if_due() {
+  local latest tmp
+  auto_update_is_due || return 0
+
+  mkdir -p "$CACHE_DIR"
+  date +%s >"$UPDATE_CACHE_FILE"
+
+  latest="$(latest_release_tag 2>/dev/null)" || return 0
+  version_is_newer "$latest" "$DEV_ROUTER_VERSION" || return 0
+
+  tmp="$(mktemp)"
+  download_version "$latest" "$tmp" 2>/dev/null || {
+    rm -f "$tmp"
+    return 0
+  }
+
+  if install_downloaded_update "$tmp" 2>/dev/null; then
+    echo "[dev] updated dev-router $DEV_ROUTER_VERSION -> $latest"
+  fi
+  rm -f "$tmp"
 }
 
 cache_file() {
@@ -645,6 +831,8 @@ usage() {
   cat <<EOF
 Usage:
   dev [prompt...]                         Auto-route to first available provider
+  dev --version                           Show dev-router version
+  dev --update                            Update dev-router from the latest GitHub release
   dev --status                            Show quota status for all providers
   dev --order                             Show provider routing order
   dev --order edit                        Reorder providers interactively
@@ -872,6 +1060,8 @@ direct_launch() {
 
 choose_and_launch() {
   local provider result available
+  auto_update_if_due
+
   while IFS= read -r provider; do
     result="$(check_provider "$provider" yes)"
     print_result_json "$provider" "$result"
@@ -910,7 +1100,14 @@ case "${1:-}" in
   -h|--help)
     usage
     ;;
+  --version|-v)
+    echo "dev-router $DEV_ROUTER_VERSION"
+    ;;
+  --update)
+    update_dev_router
+    ;;
   --status|dev-status)
+    auto_update_if_due
     status_all
     ;;
   --order)
@@ -919,10 +1116,12 @@ case "${1:-}" in
     ;;
   --use)
     shift
+    auto_update_if_due
     direct_launch no "${1:-}" "${@:2}"
     ;;
   --force-use)
     shift
+    auto_update_if_due
     direct_launch yes "${1:-}" "${@:2}"
     ;;
   --exhausted-test|--exausted-test)
@@ -944,6 +1143,7 @@ case "${1:-}" in
     fi
     ;;
   codex|glm|zai|z.ai|z-ai|agy|antigravity|google|deepseek|ds)
+    auto_update_if_due
     direct_launch yes "$1" "${@:2}"
     ;;
   *)
