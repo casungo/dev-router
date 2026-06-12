@@ -1,0 +1,687 @@
+#!/usr/bin/env bash
+set -u
+
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/dev-quota"
+CACHE_TTL_SECONDS=300
+CHECK_TIMEOUT_SECONDS=3
+
+DEV_CODEX_MODEL="${DEV_CODEX_MODEL:-gpt-5.5}"
+DEV_GLM_MODEL="${DEV_GLM_MODEL:-GLM-4.7}"
+DEV_GLM_FAST_MODEL="${DEV_GLM_FAST_MODEL:-GLM-4.5-Air}"
+DEV_AGY_MODEL="${DEV_AGY_MODEL:-Claude Sonnet 4.6 (Thinking)}"
+DEV_DEEPSEEK_MODEL="${DEV_DEEPSEEK_MODEL:-deepseek-v4-pro[1m]}"
+DEV_DEEPSEEK_FAST_MODEL="${DEV_DEEPSEEK_FAST_MODEL:-deepseek-v4-flash}"
+
+mkdir -p "$CACHE_DIR"
+
+if ! command -v jq >/dev/null 2>&1; then
+  echo "[dev] jq is required for quota parsing" >&2
+  exit 127
+fi
+
+if ! command -v curl >/dev/null 2>&1; then
+  echo "[dev] curl is required for quota checks" >&2
+  exit 127
+fi
+
+if ! command -v timeout >/dev/null 2>&1; then
+  echo "[dev] timeout is required for 3-second quota checks" >&2
+  exit 127
+fi
+
+cache_file() {
+  printf '%s/%s.json\n' "$CACHE_DIR" "$1"
+}
+
+cache_is_fresh() {
+  local file now mtime age
+  file="$(cache_file "$1")"
+  [[ -f "$file" ]] || return 1
+
+  now="$(date +%s)"
+  if stat -c %Y "$file" >/dev/null 2>&1; then
+    mtime="$(stat -c %Y "$file")"
+  else
+    mtime="$(stat -f %m "$file" 2>/dev/null || echo 0)"
+  fi
+  age=$((now - mtime))
+  [[ "$age" -ge 0 && "$age" -lt "$CACHE_TTL_SECONDS" ]]
+}
+
+write_cache() {
+  local provider available reason detail file tmp
+  provider="$1"
+  available="$2"
+  reason="$3"
+  detail="${4:-}"
+  file="$(cache_file "$provider")"
+  tmp="${file}.$$"
+
+  jq -n \
+    --arg provider "$provider" \
+    --argjson available "$available" \
+    --arg reason "$reason" \
+    --arg detail "$detail" \
+    --arg checked_at "$(date -u +%FT%TZ)" \
+    '{provider:$provider, available:$available, reason:$reason, detail:$detail, checked_at:$checked_at}' \
+    >"$tmp" && mv "$tmp" "$file"
+}
+
+read_cache() {
+  cat "$(cache_file "$1")"
+}
+
+invalidate_cache() {
+  rm -f "$(cache_file "$1")"
+}
+
+normalize_provider() {
+  local provider
+  provider="$(printf '%s' "${1:-}" | tr '[:upper:]' '[:lower:]')"
+  case "$provider" in
+    codex|openai) printf 'codex\n' ;;
+    glm|zai|z.ai|z-ai) printf 'glm\n' ;;
+    agy|antigravity|google) printf 'antigravity\n' ;;
+    deepseek|ds) printf 'deepseek\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+json_available() {
+  jq -r '.available // false' 2>/dev/null
+}
+
+json_reason() {
+  jq -r '.reason // "unknown"' 2>/dev/null
+}
+
+print_result_json() {
+  local provider padded available reason
+  provider="$1"
+  padded="$(printf '[%-8s]' "$provider")"
+  available="$(json_available <<<"$2")"
+  reason="$(json_reason <<<"$2")"
+
+  if [[ "$available" == "true" ]]; then
+    printf '%s ✓ %s\n' "$padded" "$reason"
+  else
+    printf '%s ✗ %s\n' "$padded" "$reason"
+  fi
+}
+
+curl_json() {
+  local method url body_file headers
+  method="$1"
+  url="$2"
+  body_file="${3:-}"
+  shift 3
+
+  local tmp_body http_code curl_rc
+  tmp_body="$(mktemp)"
+
+  if [[ -n "$body_file" ]]; then
+    http_code="$(
+      timeout "$CHECK_TIMEOUT_SECONDS" curl -sS -X "$method" "$url" \
+        "$@" \
+        --data @"$body_file" \
+        -o "$tmp_body" \
+        -w '%{http_code}' 2>/dev/null
+    )"
+    curl_rc=$?
+  else
+    http_code="$(
+      timeout "$CHECK_TIMEOUT_SECONDS" curl -sS -X "$method" "$url" \
+        "$@" \
+        -o "$tmp_body" \
+        -w '%{http_code}' 2>/dev/null
+    )"
+    curl_rc=$?
+  fi
+
+  if [[ "$curl_rc" -ne 0 ]]; then
+    printf '{"http_code":0,"body":null,"error":"request failed or timed out"}\n'
+    rm -f "$tmp_body"
+    return 0
+  fi
+
+  jq -n \
+    --argjson body "$(jq -c . "$tmp_body" 2>/dev/null || jq -Rn --rawfile raw "$tmp_body" '$raw')" \
+    --argjson http_code "${http_code:-0}" \
+    '{http_code:$http_code, body:$body}'
+  rm -f "$tmp_body"
+}
+
+codex_window_status_jq='
+  def pct_exhausted:
+    (.used_percent? // .usedPercent? // .usage_percent? // .usagePercent? // null) as $p
+    | if ($p | type) == "number" then $p >= 100 else false end;
+  def rem_exhausted:
+    (.remaining? // .remaining_units? // .remainingUnits? // null) as $r
+    | if ($r | type) == "number" then $r <= 0 else false end;
+  def available:
+    if type != "object" then false
+    elif pct_exhausted or rem_exhausted then false
+    elif ((.remaining? // .remaining_units? // .remainingUnits? // null) | type) == "number" then true
+    elif ((.used_percent? // .usedPercent? // .usage_percent? // .usagePercent? // null) | type) == "number" then true
+    else false end;
+  def status:
+  {
+    available: available,
+    used_percent: (.used_percent? // .usedPercent? // .usage_percent? // .usagePercent? // null),
+    remaining: (.remaining? // .remaining_units? // .remainingUnits? // null),
+    reset: (.reset_at? // .resets_at? // .resetAfter? // .reset_after? // null)
+  };
+'
+
+check_codex_live() {
+  local auth_file access_token account_id response http body five weekly primary secondary
+  auth_file="$HOME/.codex/auth.json"
+
+  if ! command -v codex >/dev/null 2>&1; then
+    write_cache codex false "codex CLI not found"
+    read_cache codex
+    return
+  fi
+
+  if [[ ! -f "$auth_file" ]]; then
+    write_cache codex false "missing $auth_file"
+    read_cache codex
+    return
+  fi
+
+  access_token="$(jq -r '.tokens.access_token // empty' "$auth_file" 2>/dev/null)"
+  account_id="$(jq -r '.tokens.account_id // empty' "$auth_file" 2>/dev/null)"
+
+  if [[ -z "$access_token" || -z "$account_id" ]]; then
+    write_cache codex false "missing Codex access token or account id"
+    read_cache codex
+    return
+  fi
+
+  response="$(curl_json GET "https://chatgpt.com/backend-api/wham/usage" "" \
+    -H "Authorization: Bearer $access_token" \
+    -H "ChatGPT-Account-Id: $account_id" \
+    -H "Accept: application/json")"
+  http="$(jq -r '.http_code' <<<"$response")"
+  body="$(jq -c '.body' <<<"$response")"
+
+  if [[ "$http" -eq 401 || "$http" -eq 403 ]]; then
+    write_cache codex false "auth failed checking quota" "$body"
+    read_cache codex
+    return
+  fi
+
+  if [[ "$http" -ne 200 ]]; then
+    write_cache codex false "quota check failed (HTTP $http)" "$body"
+    read_cache codex
+    return
+  fi
+
+  five="$(jq -c "$codex_window_status_jq"'(.five_hour // .five_hour_limit // .primary_window // .primaryWindow // .rate_limit.primary_window // .rate_limit.primaryWindow // empty) | status' <<<"$body")"
+  weekly="$(jq -c "$codex_window_status_jq"'(.weekly // .weekly_limit // .secondary_window // .secondaryWindow // .rate_limit.secondary_window // .rate_limit.secondaryWindow // empty) | status' <<<"$body")"
+
+  if [[ -z "$five" || -z "$weekly" ]]; then
+    write_cache codex false "quota response did not include both Codex windows" "$body"
+    read_cache codex
+    return
+  fi
+
+  if [[ "$(jq -r '.available' <<<"$five")" == "true" && "$(jq -r '.available' <<<"$weekly")" == "true" ]]; then
+    write_cache codex true "available" "$(jq -n --argjson five "$five" --argjson weekly "$weekly" '{five_hour:$five, weekly:$weekly}')"
+  elif [[ "$(jq -r '.available' <<<"$five")" != "true" ]]; then
+    write_cache codex false "five-hour limit exhausted" "$(jq -n --argjson five "$five" --argjson weekly "$weekly" '{five_hour:$five, weekly:$weekly}')"
+  else
+    write_cache codex false "weekly limit exhausted" "$(jq -n --argjson five "$five" --argjson weekly "$weekly" '{five_hour:$five, weekly:$weekly}')"
+  fi
+  read_cache codex
+}
+
+check_glm_live() {
+  local response http body remaining tmp_body test_response test_http test_body code
+
+  if ! command -v claude >/dev/null 2>&1; then
+    write_cache glm false "claude CLI not found"
+    read_cache glm
+    return
+  fi
+
+  if [[ -z "${Z_AI_API_KEY:-}" ]]; then
+    write_cache glm false "missing Z_AI_API_KEY"
+    read_cache glm
+    return
+  fi
+
+  response="$(curl_json GET "https://api.z.ai/v4/user/quota" "" \
+    -H "Authorization: Bearer $Z_AI_API_KEY" \
+    -H "Accept: application/json")"
+  http="$(jq -r '.http_code' <<<"$response")"
+  body="$(jq -c '.body' <<<"$response")"
+  remaining="$(jq -r '.data.remaining_seconds // empty' <<<"$body" 2>/dev/null)"
+
+  if [[ "$http" -eq 200 && "$remaining" =~ ^[0-9]+$ ]]; then
+    if [[ "$remaining" -gt 0 ]]; then
+      write_cache glm true "available" "$body"
+    else
+      write_cache glm false "quota exhausted (0 seconds remaining)" "$body"
+    fi
+    read_cache glm
+    return
+  fi
+
+  tmp_body="$(mktemp)"
+  jq -n --arg model "$DEV_GLM_FAST_MODEL" '{model:$model, messages:[{role:"user", content:"hi"}], max_tokens:1}' >"$tmp_body"
+  test_response="$(curl_json POST "https://api.z.ai/api/coding/paas/v4/chat/completions" "$tmp_body" \
+    -H "Authorization: Bearer $Z_AI_API_KEY" \
+    -H "Content-Type: application/json" \
+    -H "Accept-Language: en-US,en" \
+    -H "Accept: application/json")"
+  rm -f "$tmp_body"
+
+  test_http="$(jq -r '.http_code' <<<"$test_response")"
+  test_body="$(jq -c '.body' <<<"$test_response")"
+  code="$(jq -r '.error.code // .code // empty' <<<"$test_body" 2>/dev/null)"
+
+  if [[ "$test_http" -eq 200 ]]; then
+    write_cache glm true "available (test call passed)" "$test_body"
+  elif [[ "$test_http" -eq 429 || "$code" =~ ^(1302|1303|1113)$ ]]; then
+    write_cache glm false "rate-limited or quota exhausted" "$test_body"
+  else
+    write_cache glm false "quota check unclear (HTTP $test_http)" "$test_body"
+  fi
+  read_cache glm
+}
+
+check_antigravity_live() {
+  local help_text status_output probe_output probe_rc token response http body message tmp_body
+
+  if ! command -v agy >/dev/null 2>&1; then
+    write_cache antigravity false "agy CLI not found"
+    read_cache antigravity
+    return
+  fi
+
+  help_text="$(timeout "$CHECK_TIMEOUT_SECONDS" agy --help 2>&1 || true)"
+  if grep -q -- '--status' <<<"$help_text"; then
+    status_output="$(timeout "$CHECK_TIMEOUT_SECONDS" agy --status 2>&1)"
+    if [[ "$?" -eq 0 ]]; then
+      write_cache antigravity true "available (agy --status passed)" "$status_output"
+    elif grep -Eiq 'quota.*exhausted|exhausted.*quota|RESOURCE_EXHAUSTED|HTTP[[:space:]]*429|(^|[^0-9])429([^0-9]|$)' <<<"$status_output"; then
+      write_cache antigravity false "quota exhausted" "$status_output"
+    else
+      write_cache antigravity false "agy --status failed" "$status_output"
+    fi
+    read_cache antigravity
+    return
+  fi
+
+  if command -v python3 >/dev/null 2>&1; then
+    probe_output="$(timeout "$CHECK_TIMEOUT_SECONDS" python3 - <<'PY' 2>&1
+import fcntl
+import os
+import pty
+import re
+import select
+import struct
+import subprocess
+import termios
+import time
+
+master, slave = pty.openpty()
+try:
+    fcntl.ioctl(slave, termios.TIOCSWINSZ, struct.pack("HHHH", 60, 220, 0, 0))
+except Exception:
+    pass
+
+proc = subprocess.Popen(["agy"], stdin=slave, stdout=slave, stderr=slave, close_fds=True)
+os.close(slave)
+out = bytearray()
+start = time.time()
+sent = False
+ansi = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
+
+def clean_text():
+    text = out.decode("utf-8", "ignore")
+    text = ansi.sub("", text)
+    text = re.sub(r"\x1b\][^\x07]*(?:\x07|\x1b\\)", "", text)
+    return text.replace("\r", "\n")
+
+while time.time() - start < 2.8:
+    ready, _, _ = select.select([master], [], [], 0.05)
+    if ready:
+        try:
+            chunk = os.read(master, 8192)
+        except OSError:
+            break
+        if not chunk:
+            break
+        out.extend(chunk)
+
+    text = clean_text()
+    if not sent and ("? for shortcuts" in text or "\n>\n" in text):
+        os.write(master, b"/usage\r")
+        sent = True
+
+    if sent and ("Model Quota" in text or "Quota available" in text or "RESOURCE_EXHAUSTED" in text):
+        os.write(master, b"\x1b")
+        time.sleep(0.1)
+        break
+
+try:
+    proc.terminate()
+    proc.wait(timeout=0.3)
+except Exception:
+    try:
+        proc.kill()
+    except Exception:
+        pass
+
+print(clean_text())
+PY
+)"
+    probe_rc=$?
+
+    if [[ "$probe_rc" -eq 0 && "$probe_output" == *"Model Quota"* && "$probe_output" == *"Quota available"* ]]; then
+      write_cache antigravity true "available (/usage quota available)" "$probe_output"
+      read_cache antigravity
+      return
+    fi
+
+    if grep -Eiq 'authentication required|log in|authorization code|oauth|not authenticated|not signed in|not logged into Antigravity' <<<"$probe_output"; then
+      write_cache antigravity false "authentication required"
+      read_cache antigravity
+      return
+    fi
+
+    if grep -Eiq 'quota.*exhausted|exhausted.*quota|RESOURCE_EXHAUSTED|HTTP[[:space:]]*429|(^|[^0-9])429([^0-9]|$)' <<<"$probe_output"; then
+      write_cache antigravity false "quota exhausted" "$probe_output"
+      read_cache antigravity
+      return
+    fi
+
+    if [[ "$probe_rc" -eq 124 ]]; then
+      write_cache antigravity false "agy /usage probe timed out" "$probe_output"
+      read_cache antigravity
+      return
+    fi
+  else
+    probe_output="$(timeout "$CHECK_TIMEOUT_SECONDS" agy --print "hi" --print-timeout "${CHECK_TIMEOUT_SECONDS}s" 2>&1)"
+    probe_rc=$?
+    if [[ "$probe_rc" -eq 0 ]]; then
+      write_cache antigravity true "available (agy --print probe passed)" "$probe_output"
+      read_cache antigravity
+      return
+    fi
+  fi
+
+  token="${ANTIGRAVITY_ACCESS_TOKEN:-}"
+  if [[ -z "$token" ]] && command -v gcloud >/dev/null 2>&1; then
+    token="$(timeout "$CHECK_TIMEOUT_SECONDS" gcloud auth print-access-token 2>/dev/null || true)"
+  fi
+
+  if [[ -z "$token" ]]; then
+    write_cache antigravity false "no agy --status and no Antigravity access token for API probe"
+    read_cache antigravity
+    return
+  fi
+
+  tmp_body="$(mktemp)"
+  jq -n '{prompt:"hi", max_output_tokens:1}' >"$tmp_body"
+  response="$(curl_json POST "https://antigravity.googleapis.com/v1/query" "$tmp_body" \
+    -H "Authorization: Bearer $token" \
+    -H "Content-Type: application/json" \
+    -H "Accept: application/json")"
+  rm -f "$tmp_body"
+
+  http="$(jq -r '.http_code' <<<"$response")"
+  body="$(jq -c '.body' <<<"$response")"
+  message="$(jq -r '(.error.message // .message // .error.status // empty)' <<<"$body" 2>/dev/null)"
+
+  if [[ "$http" -eq 200 ]]; then
+    write_cache antigravity true "available (API probe passed)" "$body"
+  elif [[ "$http" -eq 429 ]] || grep -Eiq 'quota.*exhausted|exhausted.*quota|RESOURCE_EXHAUSTED' <<<"$message $body"; then
+    write_cache antigravity false "quota exhausted" "$body"
+  else
+    write_cache antigravity false "Antigravity API probe failed (HTTP $http)" "$body"
+  fi
+  read_cache antigravity
+}
+
+check_deepseek_live() {
+  if ! command -v claude >/dev/null 2>&1; then
+    write_cache deepseek false "claude CLI not found"
+  elif [[ -z "${DEEPSEEK_API_KEY:-}" ]]; then
+    write_cache deepseek false "missing DEEPSEEK_API_KEY"
+  else
+    write_cache deepseek true "available (pay-per-token fallback)"
+  fi
+  read_cache deepseek
+}
+
+check_provider() {
+  local provider use_cache="${2:-yes}"
+  provider="$1"
+
+  if [[ "$use_cache" == "yes" ]] && cache_is_fresh "$provider"; then
+    read_cache "$provider"
+    return
+  fi
+
+  case "$provider" in
+    codex) check_codex_live ;;
+    glm) check_glm_live ;;
+    antigravity) check_antigravity_live ;;
+    deepseek) check_deepseek_live ;;
+    *) write_cache "$provider" false "unknown provider"; read_cache "$provider" ;;
+  esac
+}
+
+run_and_invalidate_on_quota_failure() {
+  local provider rc tmp_err
+  provider="$1"
+  shift
+  tmp_err="$(mktemp)"
+
+  "$@" 2> >(tee "$tmp_err" >&2)
+  rc=$?
+
+  if [[ "$rc" -ne 0 ]] && grep -Eiq '(^|[^0-9])429([^0-9]|$)|rate.?limit|quota|RESOURCE_EXHAUSTED|exhausted' "$tmp_err"; then
+    invalidate_cache "$provider"
+    printf '[%s] cache invalidated after quota-looking failure\n' "$provider" >&2
+  fi
+
+  rm -f "$tmp_err"
+  return "$rc"
+}
+
+status_all() {
+  local provider result
+  for provider in codex glm antigravity deepseek; do
+    result="$(check_provider "$provider" yes)"
+    print_result_json "$provider" "$result"
+  done
+}
+
+mark_exhausted_for_test() {
+  local provider input
+  input="${1:-}"
+  if ! provider="$(normalize_provider "$input")"; then
+    echo "[dev] unknown provider for exhausted test: ${input:-<missing>}" >&2
+    echo "[dev] expected one of: codex, glm, antigravity, deepseek" >&2
+    return 2
+  fi
+
+  write_cache "$provider" false "forced exhausted test ($provider)" "Created by dev --exhausted-test; clear with dev --clear-cache or wait 5 minutes."
+  echo "[dev] marked $provider unavailable in cache for $CACHE_TTL_SECONDS seconds"
+  echo "[dev] run 'dev --status' or 'dev ...' to test fallback"
+}
+
+usage() {
+  cat <<EOF
+Usage:
+  dev [prompt...]                         Auto-route to first available provider
+  dev --status                            Show quota status for all providers
+  dev --use <provider> [args...]          Check then launch one provider directly
+  dev --force-use <provider> [args...]    Launch one provider directly without quota check
+  dev <provider> [args...]                Launch one provider directly without quota check
+  dev --exhausted-test <provider>         Mark provider unavailable in cache for fallback tests
+  dev --clear-cache [provider]            Clear quota cache
+
+Providers: codex, glm, agy, antigravity, deepseek
+EOF
+}
+
+launch_provider() {
+  local provider
+  provider="$1"
+  shift
+
+  case "$provider" in
+    codex)
+      echo "▶ Launching codex directly ($DEV_CODEX_MODEL)"
+      run_and_invalidate_on_quota_failure codex codex \
+        --model "$DEV_CODEX_MODEL" \
+        --dangerously-bypass-approvals-and-sandbox \
+        "$@"
+      return $?
+      ;;
+    glm)
+      echo "▶ Launching claude+GLM directly ($DEV_GLM_MODEL)"
+      run_and_invalidate_on_quota_failure glm env \
+        ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic" \
+        ANTHROPIC_AUTH_TOKEN="$Z_AI_API_KEY" \
+        ANTHROPIC_MODEL="$DEV_GLM_MODEL" \
+        ANTHROPIC_DEFAULT_OPUS_MODEL="$DEV_GLM_MODEL" \
+        ANTHROPIC_DEFAULT_SONNET_MODEL="$DEV_GLM_MODEL" \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL="$DEV_GLM_FAST_MODEL" \
+        CLAUDE_CODE_SUBAGENT_MODEL="$DEV_GLM_FAST_MODEL" \
+        claude --model "$DEV_GLM_MODEL" --dangerously-skip-permissions "$@"
+      return $?
+      ;;
+    antigravity)
+      echo "▶ Launching agy directly ($DEV_AGY_MODEL)"
+      run_and_invalidate_on_quota_failure antigravity agy \
+        --model "$DEV_AGY_MODEL" \
+        --dangerously-skip-permissions \
+        "$@"
+      return $?
+      ;;
+    deepseek)
+      echo "▶ Launching claude+DeepSeek directly ($DEV_DEEPSEEK_MODEL)"
+      run_and_invalidate_on_quota_failure deepseek env \
+        ANTHROPIC_BASE_URL="https://api.deepseek.com/anthropic" \
+        ANTHROPIC_AUTH_TOKEN="$DEEPSEEK_API_KEY" \
+        ANTHROPIC_MODEL="$DEV_DEEPSEEK_MODEL" \
+        ANTHROPIC_DEFAULT_OPUS_MODEL="$DEV_DEEPSEEK_MODEL" \
+        ANTHROPIC_DEFAULT_SONNET_MODEL="$DEV_DEEPSEEK_MODEL" \
+        ANTHROPIC_DEFAULT_HAIKU_MODEL="$DEV_DEEPSEEK_FAST_MODEL" \
+        CLAUDE_CODE_SUBAGENT_MODEL="$DEV_DEEPSEEK_FAST_MODEL" \
+        CLAUDE_CODE_EFFORT_LEVEL=max \
+        claude --model "$DEV_DEEPSEEK_MODEL" --dangerously-skip-permissions "$@"
+      return $?
+      ;;
+  esac
+
+  echo "[dev] unknown provider: $provider" >&2
+  return 2
+}
+
+direct_launch() {
+  local provider input result available force
+  force="${1:-no}"
+  input="${2:-}"
+  if ! provider="$(normalize_provider "$input")"; then
+    echo "[dev] unknown provider for direct launch: ${input:-<missing>}" >&2
+    echo "[dev] expected one of: codex, glm, agy, antigravity, deepseek" >&2
+    return 2
+  fi
+  shift 2
+
+  if [[ "$force" != "yes" ]]; then
+    result="$(check_provider "$provider" yes)"
+    print_result_json "$provider" "$result"
+    available="$(json_available <<<"$result")"
+    if [[ "$available" != "true" ]]; then
+      echo "[dev] $provider is unavailable; use --force-use $input to launch anyway" >&2
+      return 1
+    fi
+  fi
+
+  launch_provider "$provider" "$@"
+}
+
+choose_and_launch() {
+  local provider result available
+  for provider in codex glm antigravity deepseek; do
+    result="$(check_provider "$provider" yes)"
+    print_result_json "$provider" "$result"
+    available="$(json_available <<<"$result")"
+    [[ "$available" == "true" ]] || continue
+
+    case "$provider" in
+      codex)
+        echo "▶ Codex available"
+        launch_provider codex "$@"
+        return $?
+        ;;
+      glm)
+        echo "▶ GLM available"
+        launch_provider glm "$@"
+        return $?
+        ;;
+      antigravity)
+        echo "▶ Antigravity available"
+        launch_provider antigravity "$@"
+        return $?
+        ;;
+      deepseek)
+        echo "▶ DeepSeek available"
+        launch_provider deepseek "$@"
+        return $?
+        ;;
+    esac
+  done
+
+  echo "[dev] no provider is currently available" >&2
+  return 1
+}
+
+case "${1:-}" in
+  -h|--help)
+    usage
+    ;;
+  --status|dev-status)
+    status_all
+    ;;
+  --use)
+    shift
+    direct_launch no "${1:-}" "${@:2}"
+    ;;
+  --force-use)
+    shift
+    direct_launch yes "${1:-}" "${@:2}"
+    ;;
+  --exhausted-test|--exausted-test)
+    shift
+    mark_exhausted_for_test "${1:-}"
+    ;;
+  --clear-cache)
+    if [[ -n "${2:-}" ]]; then
+      if provider="$(normalize_provider "$2")"; then
+        invalidate_cache "$provider"
+        echo "[dev] cache cleared for $provider"
+      else
+        echo "[dev] unknown provider for cache clear: $2" >&2
+        exit 2
+      fi
+    else
+      rm -f "$CACHE_DIR"/*.json
+      echo "[dev] cache cleared: $CACHE_DIR"
+    fi
+    ;;
+  codex|glm|zai|z.ai|z-ai|agy|antigravity|google|deepseek|ds)
+    direct_launch yes "$1" "${@:2}"
+    ;;
+  *)
+    choose_and_launch "$@"
+    ;;
+esac
