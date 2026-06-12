@@ -15,6 +15,24 @@ FILES=(
   lib/dev-router/commands.bash
 )
 
+suggest_shell_config() {
+  case "$(basename "${SHELL:-}")" in
+    zsh)
+      echo "\$HOME/.zshrc"
+      ;;
+    bash)
+      if [[ "$(uname -s 2>/dev/null || true)" == "Darwin" ]]; then
+        echo "\$HOME/.bash_profile"
+      else
+        echo "\$HOME/.bashrc"
+      fi
+      ;;
+    *)
+      echo "your shell startup file"
+      ;;
+  esac
+}
+
 TMP_DIR="$(mktemp -d)"
 cleanup() {
   rm -rf "$TMP_DIR"
@@ -66,6 +84,9 @@ case ":${PATH}:" in
 esac
 
 echo
-echo "Configure provider keys with:"
+SHELL_CONFIG="$(suggest_shell_config)"
+echo "Configure provider keys by adding these to ${SHELL_CONFIG}:"
 echo "export Z_AI_API_KEY=\"...\""
 echo "export DEEPSEEK_API_KEY=\"...\""
+echo
+echo "Then restart your shell, or run: source ${SHELL_CONFIG}"
