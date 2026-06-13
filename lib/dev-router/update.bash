@@ -69,6 +69,16 @@ validate_downloaded_update() {
       return 1
     fi
   done
+
+  if grep -q '^DEV_ROUTER_VERSION=' "$tree/lib/dev-router/"*.bash; then
+    echo "[dev] downloaded update has a launcher where a module should be" >&2
+    return 1
+  fi
+
+  if ! grep -q '^require_command()' "$tree/lib/dev-router/core.bash"; then
+    echo "[dev] downloaded update has an unexpected core module" >&2
+    return 1
+  fi
 }
 
 install_downloaded_update() {

@@ -69,6 +69,16 @@ if ! grep -q '^DEV_ROUTER_VERSION=' "$TMP_DIR/bin/dev"; then
   exit 1
 fi
 
+if grep -q '^DEV_ROUTER_VERSION=' "$TMP_DIR/lib/dev-router/"*.bash; then
+  echo "Downloaded files have a launcher where a module should be" >&2
+  exit 1
+fi
+
+if ! grep -q '^require_command()' "$TMP_DIR/lib/dev-router/core.bash"; then
+  echo "Downloaded files have an unexpected core module" >&2
+  exit 1
+fi
+
 install -m 755 "$TMP_DIR/bin/dev" "$TARGET"
 install -m 644 "$TMP_DIR/lib/dev-router/"*.bash "$LIB_DIR/"
 
