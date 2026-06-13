@@ -74,8 +74,9 @@ remove_temp() {
 }
 
 self_path() {
-  local source
-  source="${BASH_SOURCE[0]:-$0}"
+  local source_index source
+  source_index=$((${#BASH_SOURCE[@]} - 1))
+  source="${BASH_SOURCE[$source_index]:-$0}"
   if [[ "$source" == */* ]]; then
     (cd "$(dirname "$source")" 2>/dev/null && printf '%s/%s\n' "$PWD" "$(basename "$source")")
   elif command -v "$source" >/dev/null 2>&1; then
