@@ -2,6 +2,12 @@ run_and_invalidate_on_quota_failure() {
   local provider rc tmp_err
   provider="$1"
   shift
+
+  if [[ -t 0 && -t 2 ]]; then
+    "$@"
+    return $?
+  fi
+
   tmp_err="$(make_temp)" || return $?
 
   "$@" 2> >(tee "$tmp_err" >&2)
@@ -273,7 +279,7 @@ choose_and_launch() {
   local provider result available
   auto_update_if_due
 
-  while IFS= read -r provider; do
+  while IFS= read -r provider <&3; do
     result="$(check_provider "$provider" yes)"
     print_result_json "$provider" "$result"
     available="$(json_available <<<"$result")"
@@ -301,7 +307,7 @@ choose_and_launch() {
         return $?
         ;;
     esac
-  done < <(provider_order)
+  done 3< <(provider_order)
 
   echo "[dev] no provider is currently available" >&2
   return 1
