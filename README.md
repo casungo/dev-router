@@ -185,6 +185,30 @@ export DEV_DEEPSEEK_MODEL="deepseek-v4-pro[1m]"
 export DEV_DEEPSEEK_FAST_MODEL="deepseek-v4-flash"
 ```
 
+## GLM MCP Servers
+
+When GLM is launched through Claude Code, dev-router injects the Z.AI MCP servers (Vision, Web Search, Web Reader, and Zread) via `claude --mcp-config`, so they are available only on the GLM path — not when routed to Codex, Antigravity, or DeepSeek. The config is generated into a temp file at launch time using your `Z_AI_API_KEY` and removed afterward.
+
+```bash
+# Turn the auto-generated Z.AI MCP servers off (default: 1 / on)
+export DEV_GLM_MCP=0
+
+# Or point at your own MCP config file instead of the generated one
+export DEV_GLM_MCP_CONFIG="$HOME/.config/dev-router/glm.mcp.json"
+```
+
+If you previously added any of these servers globally (for example with `claude mcp add -s user ...`), remove them first — otherwise they load on every provider regardless of routing:
+
+```bash
+claude mcp list
+claude mcp remove web-search-prime
+claude mcp remove web-reader
+claude mcp remove zread
+claude mcp remove zai-mcp-server
+```
+
+The Vision server (`@z_ai/mcp-server`) spawns via `npx` and needs Node.js >= 22; if it is missing, that one server fails to start while the HTTP servers still work.
+
 ## Notes
 
 This script launches tools with permission-skipping flags because that is how I use these CLIs locally. Remove those flags in `lib/dev-router/commands.bash` if you want each agent to ask for approval.

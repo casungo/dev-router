@@ -184,6 +184,59 @@ interactive_order_editor() {
   done
 }
 
+glm_mcp_config_path() {
+  # Echo a path to an MCP config file holding the Z.AI servers (vision,
+  # web search, web reader, zread) so they load only when GLM is launched.
+  # Returns 1 and prints nothing when the feature is off or unavailable.
+  # DEV_GLM_MCP=0 disables the auto-generated servers entirely; point
+  # DEV_GLM_MCP_CONFIG at a hand-written file to use that instead.
+  local tmp key
+
+  if [[ "${DEV_GLM_MCP:-1}" != "1" ]]; then
+    return 1
+  fi
+
+  if [[ -n "${DEV_GLM_MCP_CONFIG:-}" && -f "${DEV_GLM_MCP_CONFIG}" ]]; then
+    printf '%s\n' "$DEV_GLM_MCP_CONFIG"
+    return 0
+  fi
+
+  key="${Z_AI_API_KEY:-}"
+  if [[ -z "$key" ]]; then
+    return 1
+  fi
+
+  require_jq >/dev/null 2>&1 || return $?
+  tmp="$(make_temp)" || return $?
+  jq -n --arg key "$key" '{
+    mcpServers: {
+      "zai-vision": {
+        type: "stdio",
+        command: "npx",
+        args: ["-y", "@z_ai/mcp-server@latest"],
+        env: { Z_AI_API_KEY: $key, Z_AI_MODE: "ZAI" }
+      },
+      "web-search-prime": {
+        type: "http",
+        url: "https://api.z.ai/api/mcp/web_search_prime/mcp",
+        headers: { Authorization: ("Bearer " + $key) }
+      },
+      "web-reader": {
+        type: "http",
+        url: "https://api.z.ai/api/mcp/web_reader/mcp",
+        headers: { Authorization: ("Bearer " + $key) }
+      },
+      zread: {
+        type: "http",
+        url: "https://api.z.ai/api/mcp/zread/mcp",
+        headers: { Authorization: ("Bearer " + $key) }
+      }
+    }
+  }' >"$tmp" || { remove_temp "$tmp"; return 1; }
+
+  printf '%s\n' "$tmp"
+}
+
 launch_provider() {
   local provider
   provider="$1"
@@ -200,12 +253,23 @@ launch_provider() {
       return $?
       ;;
     glm)
+      local mcp_file rc
+      local -a claude_args
       require_command claude "launching GLM through Claude Code" || return $?
       if [[ -z "${Z_AI_API_KEY:-}" ]]; then
         echo "[dev] Z_AI_API_KEY is required for GLM" >&2
         return 2
       fi
-      echo "▶ Launching claude+GLM directly ($DEV_GLM_MODEL)"
+
+      mcp_file="$(glm_mcp_config_path)" || mcp_file=""
+      claude_args=(claude --model "$DEV_GLM_MODEL" --dangerously-skip-permissions)
+      if [[ -n "$mcp_file" ]]; then
+        claude_args+=(--mcp-config "$mcp_file")
+        echo "▶ Launching claude+GLM directly ($DEV_GLM_MODEL) with Z.AI MCP servers"
+      else
+        echo "▶ Launching claude+GLM directly ($DEV_GLM_MODEL)"
+      fi
+
       run_and_invalidate_on_quota_failure glm env \
         ANTHROPIC_BASE_URL="https://api.z.ai/api/anthropic" \
         ANTHROPIC_AUTH_TOKEN="$Z_AI_API_KEY" \
@@ -214,8 +278,13 @@ launch_provider() {
         ANTHROPIC_DEFAULT_SONNET_MODEL="$DEV_GLM_MODEL" \
         ANTHROPIC_DEFAULT_HAIKU_MODEL="$DEV_GLM_FAST_MODEL" \
         CLAUDE_CODE_SUBAGENT_MODEL="$DEV_GLM_FAST_MODEL" \
-        claude --model "$DEV_GLM_MODEL" --dangerously-skip-permissions "$@"
-      return $?
+        "${claude_args[@]}" "$@"
+      rc=$?
+      # Remove only the auto-generated temp config; never a user-supplied file.
+      if [[ -n "$mcp_file" && "$mcp_file" != "${DEV_GLM_MCP_CONFIG:-}" ]]; then
+        remove_temp "$mcp_file"
+      fi
+      return "$rc"
       ;;
     antigravity)
       require_command agy "launching Antigravity" || return $?
