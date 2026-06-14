@@ -8,12 +8,11 @@ curl_json() {
   local tmp_body http_code curl_rc
   require_curl || return $?
   require_jq || return $?
-  require_timeout || return $?
   tmp_body="$(make_temp)" || return $?
 
   if [[ -n "$body_file" ]]; then
     http_code="$(
-      run_with_timeout "$CHECK_TIMEOUT_SECONDS" curl -sS -X "$method" "$url" \
+      curl -sS -X "$method" "$url" \
         "$@" \
         --data @"$body_file" \
         -o "$tmp_body" \
@@ -22,7 +21,7 @@ curl_json() {
     curl_rc=$?
   else
     http_code="$(
-      run_with_timeout "$CHECK_TIMEOUT_SECONDS" curl -sS -X "$method" "$url" \
+      curl -sS -X "$method" "$url" \
         "$@" \
         -o "$tmp_body" \
         -w '%{http_code}' 2>/dev/null
@@ -31,7 +30,7 @@ curl_json() {
   fi
 
   if [[ "$curl_rc" -ne 0 ]]; then
-    printf '{"http_code":0,"body":null,"error":"request failed or timed out"}\n'
+    printf '{"http_code":0,"body":null,"error":"request failed"}\n'
     remove_temp "$tmp_body"
     return 0
   fi
